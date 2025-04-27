@@ -5,168 +5,178 @@ import time
 from flask import Flask, render_template
 import pyrender
 import trimesh
+from pygltflib import GLTF2
 from PIL import Image
-import io
+import numpy as np
+import struct
+import os
+import math
 
 app = Flask(__name__)
 
-# Global frame buffer for thread-safe sharing
+# Global değişkenler
 latest_frame = None
 frame_width = 800
 frame_height = 600
-frame_lock = threading.Lock()  # Lock for thread-safe access to latest_frame
+frame_lock = threading.Lock()
 
 # Animasyon state
-model_angle = 0.0  # fallback için
-model_angle_lock = threading.Lock()
-active_animation_index = None  # Oynatılan animasyonun index'i
-animation_start_time = None   # Oynatılmaya başlanan zaman
-animation_lock = threading.Lock()
-gltf_animations = []  # Animasyon verileri
-
-# Orbit kamera state
 global_orbit_angle = 0.0
 orbit_angle_lock = threading.Lock()
 camera_node = None
-# Model yükleyici ve sahne oluşturucu
+
+# Animasyon datası
+gltf_model = None
+gltf_animations = []
+glb_buffer_bytes = None
+animation_start_time = None
+active_animation_index = None
+animation_lock = threading.Lock()
+
 def load_gltf_scene():
-    global gltf_animations, camera_node
+    global gltf_model, gltf_animations, camera_node, glb_buffer_bytes
+
     print("Model yükleniyor...")
+    # Geometriyi yükle
     mesh = trimesh.load('static/model.glb')
-    print("Model tipi:", type(mesh))
-    print("Mesh summary:", mesh)
+
+    # GLTF ham veriyi yükle
+    gltf_model = GLTF2().load('static/model.glb')
+
+    # GLB buffer'ı oku
+    with open('static/model.glb', 'rb') as f:
+        glb_buffer_bytes = f.read()
+
     # Animasyonları al
-    print('mesh.animations:', getattr(mesh, 'animations', None))
-    print('mesh type:', type(mesh))
-    print('mesh dir:', dir(mesh))
-    if hasattr(mesh, 'animations') and mesh.animations:
-        gltf_animations = mesh.animations
-        print(f"Animasyonlar bulundu: {len(gltf_animations)} adet")
-        for i, anim in enumerate(gltf_animations):
-            print(f"Animasyon {i}: {anim}")
-        # Eğer sadece bir animasyon varsa, otomatik başlat
-        if len(gltf_animations) == 1:
-            global active_animation_index, animation_start_time
-            active_animation_index = 0
-            animation_start_time = time.time()
-    else:
-        print("Animasyon bulunamadı.")
+    gltf_animations = gltf_model.animations or []
+    print(f"{len(gltf_animations)} adet animasyon bulundu.")
+
+    # Scene oluştur
     scene = pyrender.Scene()
     if isinstance(mesh, trimesh.Scene):
         for name, geometry in mesh.geometry.items():
             scene.add(pyrender.Mesh.from_trimesh(geometry))
     else:
         scene.add(pyrender.Mesh.from_trimesh(mesh))
-    # Daha belirgin bir ışık ekle
+
+    # Işık ve kamera ekle
     light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=5.0)
-    scene.add(light, pose=[[1,0,0,0],[0,1,0,5],[0,0,1,5],[0,0,0,1]])
-    # Kamerayı daha yukarıdan ve uzaktan bakacak şekilde ayarla
+    scene.add(light, pose=np.eye(4))
+
     camera = pyrender.PerspectiveCamera(yfov=np.pi/3.0)
-    camera_pose = np.array([[1,0,0,0],[0,1,0,2],[0,0,1,6],[0,0,0,1]])
+    camera_pose = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 2],
+        [0, 0, 1, 6],
+        [0, 0, 0, 1],
+    ])
     camera_node = scene.add(camera, pose=camera_pose)
+
     return scene
 
-# Offscreen renderer for Flask
+def read_accessor_data(gltf, accessor_idx, glb_buffer_bytes):
+    accessor = gltf.accessors[accessor_idx]
+    buffer_view = gltf.bufferViews[accessor.bufferView]
+    buffer_offset = buffer_view.byteOffset or 0
+    accessor_offset = accessor.byteOffset or 0
+    total_offset = buffer_offset + accessor_offset
+    count = accessor.count
+    dtype = np.float32 if accessor.componentType == 5126 else np.uint16  # 5126: FLOAT, 5123: UNSIGNED_SHORT
+    ncomp = {'SCALAR': 1, 'VEC3': 3, 'VEC4': 4}[accessor.type]
+    total_bytes = count * ncomp * np.dtype(dtype).itemsize
+    # GLB'de JSON + BIN chunk offseti olabilir, buffer_view.byteOffset genelde doğrudur
+    data = glb_buffer_bytes[total_offset:total_offset+total_bytes]
+    arr = np.frombuffer(data, dtype=dtype, count=count*ncomp)
+    arr = arr.reshape((count, ncomp))
+    return arr
+
 def flask_render_loop(scene):
-    global latest_frame, model_angle, active_animation_index, animation_start_time, gltf_animations, global_orbit_angle, camera_node
+    global latest_frame, animation_start_time, active_animation_index
     renderer = pyrender.OffscreenRenderer(frame_width, frame_height)
-    mesh_nodes = [node for node in scene.get_nodes() if isinstance(node.mesh, pyrender.Mesh)]
-    mesh_node = mesh_nodes[0] if mesh_nodes else None
-    import time as _time
+
     while True:
-        # Kamera orbit pozisyonu
         with orbit_angle_lock:
-            orbit_angle = global_orbit_angle
-        radius = 6.0
-        height = 2.0
-        cam_x = radius * np.sin(orbit_angle)
-        cam_z = radius * np.cos(orbit_angle)
-        camera_pose = np.array([
-            [1, 0, 0, cam_x],
-            [0, 1, 0, height],
-            [0, 0, 1, cam_z],
-            [0, 0, 0, 1]
-        ])
-        if camera_node is not None:
-            scene.set_pose(camera_node, pose=camera_pose)
-        # Animasyon oynatılıyor mu?
+            y_angle = global_orbit_angle
+        from scipy.spatial.transform import Rotation as R
+        user_rot_y = R.from_euler('y', y_angle).as_matrix()
+        user_rot_mat = np.eye(4)
+        user_rot_mat[:3, :3] = user_rot_y
+
+        # Animasyonu uygula
         with animation_lock:
-            anim_idx = active_animation_index
-            anim_start = animation_start_time
-        if anim_idx is not None and anim_idx < len(gltf_animations):
-            anim = gltf_animations[anim_idx]
-            duration = anim['channels'][0]['sampler']['input'][-1] if anim['channels'] else 1.0
-            now = _time.time()
-            t = ((now - anim_start) % duration) if anim_start else 0.0
-            for ch in anim['channels']:
-                node_idx = ch['target']['node']
-                path = ch['target']['path']
-                sampler = ch['sampler']
-                input_times = sampler['input']
-                output_vals = sampler['output']
-                idx = min(range(len(input_times)), key=lambda i: abs(input_times[i] - t))
-                val = output_vals[idx]
-                nodes = list(scene.graph.nodes)
-                if node_idx < len(nodes):
-                    node_name = nodes[node_idx]
-                    if path == 'rotation':
-                        from scipy.spatial.transform import Rotation as R
-                        quat = val
-                        rot = R.from_quat([quat[0], quat[1], quat[2], quat[3]]).as_matrix()
-                        mat = np.eye(4)
-                        mat[:3,:3] = rot
-                        scene.graph[node_name].matrix = mat
-                    elif path == 'translation':
-                        mat = np.eye(4)
-                        mat[:3,3] = val
-                        scene.graph[node_name].matrix = mat
-                    elif path == 'scale':
-                        mat = np.eye(4)
-                        mat[0,0], mat[1,1], mat[2,2] = val
-                        scene.graph[node_name].matrix = mat
+            idx = active_animation_index
+            start_time = animation_start_time
+
+        # Node'lara dönüşleri uygula
+        for node in scene.get_nodes():
+            if hasattr(node, 'mesh') and node.mesh is not None:
+                anim_applied = False
+                if idx is not None and start_time is not None and idx < len(gltf_animations):
+                    anim = gltf_animations[idx]
+                    now = time.time()
+                    t = (now - start_time)
+                    for channel in anim.channels:
+                        sampler = anim.samplers[channel.sampler]
+                        # Input (keyframe times)
+                        input_times = read_accessor_data(gltf_model, sampler.input, glb_buffer_bytes).flatten()
+                        # Output (values)
+                        output_vals = read_accessor_data(gltf_model, sampler.output, glb_buffer_bytes)
+                        # Animasyonun node'u doğruysa uygula
+                        if channel.target.node == node.name and channel.target.path == 'rotation':
+                            # GLTF'de quaternion (x, y, z, w)
+                            from scipy.spatial.transform import Rotation as R
+                            # En yakın keyframe'i bul
+                            idx_frame = np.searchsorted(input_times, t, side='right') - 1
+                            if idx_frame < 0:
+                                idx_frame = 0
+                            quat = output_vals[idx_frame]
+                            anim_rot = R.from_quat(quat).as_matrix()
+                            anim_mat = np.eye(4)
+                            anim_mat[:3, :3] = anim_rot
+                            # Kullanıcı dönüşüyle birleştir
+                            final_mat = np.matmul(anim_mat, user_rot_mat)
+                            scene.set_pose(node, pose=final_mat)
+                            anim_applied = True
+                if not anim_applied:
+                    # Sadece kullanıcı dönüşünü uygula
+                    scene.set_pose(node, pose=user_rot_mat)
+
+        # Frame çizimi
         color, _ = renderer.render(scene)
         image = Image.fromarray(color)
-        if not hasattr(flask_render_loop, "saved"): 
-            image.save("debug_render.png")
-            flask_render_loop.saved = True
         frame_data = base64.b64encode(color.tobytes()).decode('utf-8')
 
         with frame_lock:
-            latest_frame = frame_data  # Thread-safe write to latest_frame
+            latest_frame = frame_data
+
+        time.sleep(0.05)
+
+        with frame_lock:
+            latest_frame = frame_data
+
         time.sleep(0.05)
 
 @app.route('/')
 def index():
-    return render_template('index.html')  # HTML dosyanızın adı
+    return render_template('index.html')
 
 @app.route('/render_frame')
 def render_frame():
     global latest_frame
     if latest_frame is None:
         return {'width': frame_width, 'height': frame_height, 'image': ''}
-    
     return {'width': frame_width, 'height': frame_height, 'image': latest_frame}
 
 @app.route('/key_event/<key>', methods=['POST'])
 def key_event(key):
-    print(f"Key event received: {key}")
-    global model_angle, active_animation_index, animation_start_time, global_orbit_angle
-    # Tuşa göre animasyon ata (ör: q=0, w=1)
+    global global_orbit_angle
     if key == 'q':
-        with animation_lock:
-            active_animation_index = 0
-            animation_start_time = __import__('time').time()
+        with orbit_angle_lock:
+            global_orbit_angle -= math.radians(15)
     elif key == 'w':
-        with animation_lock:
-            active_animation_index = 1
-            animation_start_time = __import__('time').time()
-    elif key == 'a':
         with orbit_angle_lock:
-            global_orbit_angle -= 0.1
-    elif key == 'd':
-        with orbit_angle_lock:
-            global_orbit_angle += 0.1
-    return '', 204
+            global_orbit_angle += math.radians(15)
+    return ('', 204)
 
 if __name__ == '__main__':
     scene = load_gltf_scene()

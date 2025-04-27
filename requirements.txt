@@ -1,0 +1,7 @@
+Flask
+trimesh
+pyrender
+numpy
+pillow
+scipy
+pygltflib
