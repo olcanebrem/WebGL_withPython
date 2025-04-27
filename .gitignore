@@ -1,0 +1,17 @@
+node_modules/
+# Derlenmiş Python dosyaları
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ortam değişkenleri
+.env
+.venv/
+# IDE/Editör dosyaları
+.vscode/
+.idea/
+
+# Sistem dosyaları
+.DS_Store
+Thumbs.db
