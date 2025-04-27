@@ -6,8 +6,11 @@ __pycache__/
 *.pyd
 
 # Ortam değişkenleri
+venv/
+.venv*
+env/
+*.env/
 .env
-.venv/
 # IDE/Editör dosyaları
 .vscode/
 .idea/

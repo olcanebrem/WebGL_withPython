@@ -50,13 +50,15 @@
 
         // Klavye ile q ve w tuşlarını server'a POST et
         document.addEventListener('keydown', function(event) {
-            if (event.key === 'q' || event.key === 'w') {
+            if (['q', 'w', 'a', 'd'].includes(event.key)) {
+                console.log('Sending key:', event.key);
                 fetch('/key_event/' + event.key, { method: 'POST' });
             }
         });
 
         // Her 100ms'de bir yeni frame iste
         setInterval(fetchFrame, 100);
+        console.log('Script loaded!');
     </script>
 </body>
 </html>
