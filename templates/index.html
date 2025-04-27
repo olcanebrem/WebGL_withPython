@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Model with OpenGL</title>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <style>
+        canvas {
+            width: 800px;
+            height: 600px;
+        }
+    </style>
+</head>
+<body>
+    <h1>OpenGL Render</h1>
+    <div id="container">
+        <canvas id="oglCanvas" width="800" height="600"></canvas>
+    </div>
+
+    <script>
+        function fetchFrame() {
+            fetch('/render_frame')
+                .then(response => response.json())
+                .then(data => {
+                    const width = data.width;
+                    const height = data.height;
+                    const base64 = data.image;
+                    // Decode base64 to binary
+                    const binary = atob(base64);
+                    const len = binary.length;
+                    const bytes = new Uint8ClampedArray(len);
+                    for (let i = 0; i < len; i++) {
+                        bytes[i] = binary.charCodeAt(i);
+                    }
+                    // ImageData expects RGBA, so we have to convert RGB to RGBA
+                    const rgba = new Uint8ClampedArray(width * height * 4);
+                    for (let i = 0, j = 0; i < len; i += 3, j += 4) {
+                        rgba[j] = bytes[i];
+                        rgba[j + 1] = bytes[i + 1];
+                        rgba[j + 2] = bytes[i + 2];
+                        rgba[j + 3] = 255; // opaque alpha
+                    }
+                    const imageData = new ImageData(rgba, width, height);
+                    const canvas = document.getElementById("oglCanvas");
+                    const ctx = canvas.getContext("2d");
+                    ctx.putImageData(imageData, 0, 0);
+                })
+                .catch(err => console.error("Error fetching frame: ", err));
+        }
+
+        // Klavye ile q ve w tuşlarını server'a POST et
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'q' || event.key === 'w') {
+                fetch('/key_event/' + event.key, { method: 'POST' });
+            }
+        });
+
+        // Her 100ms'de bir yeni frame iste
+        setInterval(fetchFrame, 100);
+    </script>
+</body>
+</html>
