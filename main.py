@@ -2,7 +2,7 @@ import numpy as np
 import base64
 import threading
 import time
-from flask import Flask, render_template
+from flask import Flask, render_template, Blueprint, request
 import pyrender
 import trimesh
 from pygltflib import GLTF2
@@ -11,6 +11,8 @@ import numpy as np
 import struct
 import os
 import math
+
+bp = Blueprint('webgl', __name__, url_prefix='/webgl')
 
 app = Flask(__name__)
 
@@ -156,18 +158,18 @@ def flask_render_loop(scene):
 
         time.sleep(0.05)
 
-@app.route('/')
+@bp.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/render_frame')
+@bp.route('/render_frame')
 def render_frame():
     global latest_frame
     if latest_frame is None:
         return {'width': frame_width, 'height': frame_height, 'image': ''}
     return {'width': frame_width, 'height': frame_height, 'image': latest_frame}
 
-@app.route('/key_event/<key>', methods=['POST'])
+@bp.route('/key_event/<key>', methods=['POST'])
 def key_event(key):
     global global_orbit_angle
     if key == 'q':
@@ -182,4 +184,6 @@ if __name__ == '__main__':
     scene = load_gltf_scene()
     t = threading.Thread(target=flask_render_loop, args=(scene,), daemon=True)
     t.start()
-    app.run(debug=True, use_reloader=False)
+    app.register_blueprint(bp)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)

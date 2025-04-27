@@ -19,7 +19,7 @@
 
     <script>
         function fetchFrame() {
-            fetch('/render_frame')
+            fetch('/webgl/render_frame')
                 .then(response => response.json())
                 .then(data => {
                     const width = data.width;
@@ -52,7 +52,7 @@
         document.addEventListener('keydown', function(event) {
             if (['q', 'w', 'a', 'd'].includes(event.key)) {
                 console.log('Sending key:', event.key);
-                fetch('/key_event/' + event.key, { method: 'POST' });
+                fetch('/webgl/key_event/' + event.key, { method: 'POST' });
             }
         });
 
